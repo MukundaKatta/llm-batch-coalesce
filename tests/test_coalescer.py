@@ -229,6 +229,35 @@ def test_inflight_count_visible_during_call():
     assert c.stats().inflight_count == 0
 
 
+def test_after_cancel_same_key_fires_fresh():
+    c = RequestCoalescer()
+    started = threading.Event()
+    release = threading.Event()
+    invocations = [0]
+
+    def fn():
+        invocations[0] += 1
+        started.set()
+        release.wait(timeout=5)
+        return "leader"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        leader = pool.submit(c.call, "k", fn)
+        assert started.wait(timeout=5)
+        # cancel removes the in-flight entry; the running leader is not stopped
+        assert c.cancel("k") is True
+        assert c.stats().inflight_count == 0
+        release.set()
+        assert leader.result(timeout=5) == "leader"
+
+        # a fresh call with the same key must fire a new underlying call
+        started.clear()
+        release.set()  # second fn won't block since release is already set
+        assert c.call("k", fn) == "leader"
+
+    assert invocations[0] == 2
+
+
 # ============================================================
 # AsyncRequestCoalescer (asyncio)
 # ============================================================
@@ -403,6 +432,32 @@ async def test_async_reset_stats():
     assert s.coalesced_calls == 0
 
 
+async def test_async_after_cancel_same_key_fires_fresh():
+    c = AsyncRequestCoalescer()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    invocations = 0
+
+    async def fn():
+        nonlocal invocations
+        invocations += 1
+        started.set()
+        await release.wait()
+        return "leader"
+
+    leader = asyncio.create_task(c.call("k", fn))
+    await started.wait()
+    assert await c.cancel("k") is True
+    assert c.stats().inflight_count == 0
+    release.set()
+    assert await leader == "leader"
+
+    # a fresh call with the same key must fire a new underlying call
+    started.clear()
+    assert await c.call("k", fn) == "leader"
+    assert invocations == 2
+
+
 # ============================================================
 # tiny smoke: leader's invocation time roughly equals fn time
 # (no sequential serialization across followers)
@@ -424,3 +479,15 @@ async def test_async_followers_do_not_serialize_underlying_call():
     # 20 sequential 50ms calls would be ~1s. Coalesced is one ~50ms call.
     # Allow a healthy margin for scheduler overhead.
     assert elapsed < 0.5
+
+
+# ============================================================
+# packaging: the library is fully typed, so it must ship a
+# PEP 561 py.typed marker or downstream type checkers ignore it.
+# ============================================================
+
+
+def test_package_ships_py_typed_marker():
+    from importlib.resources import files
+
+    assert (files("llm_batch_coalesce") / "py.typed").is_file()
