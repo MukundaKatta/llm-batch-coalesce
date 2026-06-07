@@ -2,7 +2,7 @@ import asyncio
 import threading
 import time
 from concurrent.futures import CancelledError as ThreadCancelledError
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 
 import pytest
 
@@ -203,6 +203,21 @@ def test_stats_returns_dataclass():
     s = c.stats()
     assert isinstance(s, CoalescerStats)
     assert s.inflight_count == 0
+
+
+def test_cancel_running_future_falls_back_to_set_exception():
+    # When the in-flight Future can no longer be cancelled via Future.cancel()
+    # (it is already RUNNING), cancel() must fall back to set_exception so
+    # waiters still wake with a CancelledError instead of hanging forever.
+    c = RequestCoalescer()
+    fut: Future = Future()
+    fut.set_running_or_notify_cancel()  # now RUNNING -> .cancel() returns False
+    c._inflight["k"] = fut  # type: ignore[index]
+
+    assert c.cancel("k") is True
+    assert "k" not in c._inflight
+    with pytest.raises(ThreadCancelledError):
+        fut.result(timeout=1)
 
 
 def test_inflight_count_visible_during_call():
